@@ -96,6 +96,10 @@ function NovaApp() {
   ]);
   const [voiceOn, setVoiceOn] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const user = useUser();
+  const shownName = settings.name !== "Commander" ? settings.name
+    : (user?.displayName || user?.email?.split("@")[0] || "Commander");
+  const accent = ACCENTS[settings.accent] ?? ACCENTS.Cyan;
   const [modes, setModes] = useState<Record<string, boolean>>({});
   const [timer, setTimer] = useState({ left: 25 * 60, total: 25 * 60, running: false });
   const [booting, setBooting] = useState<string[] | null>(null);
@@ -264,10 +268,6 @@ function NovaApp() {
     setTimeout(() => { setBooting(null); addLog("NOVA core re-initialized"); }, 350 * BOOT_LINES.length + 900);
   };
 
-  const user = useUser();
-  const shownName = settings.name !== "Commander" ? settings.name
-    : (user?.displayName || user?.email?.split("@")[0] || "Commander");
-  const accent = ACCENTS[settings.accent] ?? ACCENTS.Cyan;
 
   return (
     <main
