@@ -2,8 +2,9 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import {
-  createUserWithEmailAndPassword, onAuthStateChanged, sendPasswordResetEmail,
-  signInWithEmailAndPassword, signOut, updateProfile, type User,
+  createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification,
+  sendPasswordResetEmail, signInWithEmailAndPassword, signOut, updateProfile,
+  reload, type User,
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 
@@ -42,7 +43,71 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       </main>
     );
   if (!user) return <Login />;
+  if (!user.emailVerified) return <VerifyEmail user={user} />;
   return <UserCtx.Provider value={user}>{children}</UserCtx.Provider>;
+}
+
+/* ---------------- verify-email gate ---------------- */
+
+function VerifyEmail({ user }: { user: User }) {
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const resend = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      await sendEmailVerification(user);
+      setMsg({ text: "Sent! Check your inbox (and spam).", ok: true });
+    } catch (e) {
+      setMsg({ text: friendly(e), ok: false });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recheck = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      await reload(user);
+      if (user.emailVerified) {
+        window.location.reload(); // verified → AuthGate now lets them in
+      } else {
+        setMsg({ text: "Not verified yet — click the link in your email first.", ok: false });
+      }
+    } catch (e) {
+      setMsg({ text: friendly(e), ok: false });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="min-h-screen bg-black text-white flex items-center justify-center p-6">
+      <div className="absolute inset-0 pointer-events-none"
+        style={{ background: "radial-gradient(circle at top left,#22d3ee26,transparent 30%),radial-gradient(circle at bottom right,#22d3ee1a,transparent 35%)" }} />
+      <div className="relative z-10 w-full max-w-md rounded-3xl border border-cyan-400/25 bg-black/60 backdrop-blur-xl p-10 text-center shadow-[0_0_60px_#22d3ee14]">
+        <h1 className="text-3xl font-black text-cyan-300">◆ Verify your email</h1>
+        <p className="text-zinc-400 mt-4 text-sm leading-relaxed">
+          We sent a confirmation link to<br />
+          <span className="text-cyan-200 font-bold">{user.email}</span>.<br />
+          Click it, then press “I’ve verified” below.
+        </p>
+        {msg && <p className={`text-sm mt-4 ${msg.ok ? "text-green-400" : "text-red-400"}`}>{msg.text}</p>}
+        <button onClick={recheck} disabled={busy}
+          className="mt-6 w-full rounded-xl bg-cyan-400 py-4 text-black font-black disabled:opacity-50">
+          {busy ? "…" : "I’ve verified — continue"}
+        </button>
+        <button onClick={resend} disabled={busy}
+          className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 py-3 text-sm text-zinc-300">
+          Resend email
+        </button>
+        <button onClick={() => doSignOut()}
+          className="mt-4 text-xs text-zinc-500 hover:text-cyan-300">
+          Use a different account
+        </button>
+      </div>
+    </main>
+  );
 }
 
 /* ---------------- login screen ---------------- */
@@ -62,6 +127,10 @@ function Login() {
       if (mode === "up") {
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), pw);
         if (name.trim()) await updateProfile(cred.user, { displayName: name.trim() });
+        await sendEmailVerification(cred.user);
+        setMode("in");
+        setPw("");
+        setMsg({ text: "Account created! Check your email for a confirmation link, then sign in.", ok: true });
       } else {
         await signInWithEmailAndPassword(auth, email.trim(), pw);
       }
