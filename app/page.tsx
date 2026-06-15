@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AuthGate, useUser, doSignOut } from "./auth";
 import VoiceMode from "./voicemode";
+import {
+  type ChatSummary, type ChatMsg, listChats, loadChat, createChat,
+  saveChat, deleteChat, loadUserState, saveUserState,
+} from "@/lib/cloud";
 
 /* ================= types & constants ================= */
 
@@ -96,37 +100,40 @@ function NovaApp() {
   ]);
   const [voiceOn, setVoiceOn] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
-  const user = useUser();
-  const shownName = settings.name !== "Commander" ? settings.name
-    : (user?.displayName || user?.email?.split("@")[0] || "Commander");
-  const accent = ACCENTS[settings.accent] ?? ACCENTS.Cyan;
   const [modes, setModes] = useState<Record<string, boolean>>({});
   const [timer, setTimer] = useState({ left: 25 * 60, total: 25 * 60, running: false });
   const [booting, setBooting] = useState<string[] | null>(null);
+  const [currentChat, setCurrentChat] = useState<string | null>(null);
+  const [chatList, setChatList] = useState<ChatSummary[]>([]);
 
   const addLog = useCallback((line: string) => {
     setLog((l) => [`${new Date().toTimeString().slice(0, 5)}  ${line}`, ...l].slice(0, 30));
   }, []);
 
-  /* ---- persistence ---- */
+  /* ---- cloud persistence (Firestore per user) ---- */
+  const cloudUser = useUser();
+  const user = cloudUser;
+  const shownName = settings.name !== "Commander" ? settings.name
+    : (user?.displayName || user?.email?.split("@")[0] || "Commander");
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem("nova-web");
-      if (raw) {
-        const d = JSON.parse(raw);
-        if (d.settings) setSettings((s) => ({ ...s, ...d.settings }));
-        if (d.tasks) setTasks(d.tasks);
-        if (d.exam) setExam(d.exam);
-        if (d.installed) setInstalled(d.installed);
-        if (d.log) setLog(d.log);
+    if (!cloudUser) return;
+    (async () => {
+      const d = await loadUserState(cloudUser.uid);
+      if (d) {
+        if (d.settings) setSettings((s) => ({ ...s, ...(d.settings as object) }));
+        if (d.tasks) setTasks(d.tasks as Task[]);
+        if (d.exam) setExam(d.exam as { label: string; date: string });
+        if (d.installed) setInstalled(d.installed as Record<string, boolean>);
       }
-    } catch { /* fresh start */ }
-    setLoaded(true);
-  }, []);
+      setChatList(await listChats(cloudUser.uid));
+      setLoaded(true);
+    })();
+  }, [cloudUser]);
+
   useEffect(() => {
-    if (!loaded) return;
-    localStorage.setItem("nova-web", JSON.stringify({ settings, tasks, exam, installed, log }));
-  }, [settings, tasks, exam, installed, log, loaded]);
+    if (!loaded || !cloudUser) return;
+    saveUserState(cloudUser.uid, { settings, tasks, exam, installed });
+  }, [settings, tasks, exam, installed, loaded, cloudUser]);
 
   /* ---- live system stats ---- */
   useEffect(() => {
@@ -204,50 +211,50 @@ function NovaApp() {
   const send = useCallback(async (raw: string) => {
     const text = raw.trim();
     if (!text) return;
-    setMsgs((m) => [...m, { who: "you", text }]);
-    const low = text.toLowerCase();
+    addLog(`Assistant: ${text}`);
 
-    const openMatch = low.match(/^(?:open|launch|start)\s+(?:the\s+)?(?:app\s+)?(.+)$/);
-    const remindMatch = low.match(/^remind me (?:to |about )?(.+)$/);
-
-    let reply: string | null = null;
-    if (low === "help") {
-      reply = "Try: open safari · play music / pause / next song / now playing · remind me to feed the fish · status · or just chat (needs API key in Settings).";
-    } else if (low === "status") {
-      reply = sys
-        ? `CPU ${sys.cpu}% · RAM ${sys.ram.percent}% (${sys.ram.usedGb}/${sys.ram.totalGb} GB) · battery ${sys.battery ?? "n/a"}% · uptime ${sys.uptimeH} h`
-        : "Stats are still loading…";
-    } else if (["play", "pause", "play music", "pause music", "resume"].includes(low)) {
-      reply = (await action("music", "playpause")).text;
-    } else if (["next song", "next track", "skip"].includes(low)) {
-      reply = (await action("music", "next")).text;
-    } else if (["previous song", "previous track", "back"].includes(low)) {
-      reply = (await action("music", "prev")).text;
-    } else if (["now playing", "what's playing", "whats playing"].includes(low)) {
-      reply = (await action("music", "nowplaying")).text;
-    } else if (remindMatch) {
-      reply = (await action("reminder", remindMatch[1])).text;
-    } else if (openMatch) {
-      reply = (await action("open_app", openMatch[1])).text;
+    // start a cloud chat on first user message of a fresh conversation
+    let chatId = currentChat;
+    if (!chatId && cloudUser) {
+      chatId = await createChat(cloudUser.uid, text);
+      setCurrentChat(chatId);
+      setChatList(await listChats(cloudUser.uid));
     }
 
-    if (reply !== null) {
-      addLog(`Assistant: ${text}`);
-      novaSay(reply);
-      return;
+    const withUser: Msg[] = [...msgs, { who: "you", text }];
+    setMsgs(withUser);
+
+    const res = await runCommand(text);
+    const novaMsg: Msg = { who: "nova", text: res.text };
+    const full = [...withUser, novaMsg];
+    setMsgs(full);
+    novaSay(res.text);
+
+    if (cloudUser && chatId) {
+      await saveChat(cloudUser.uid, chatId, full as ChatMsg[]);
+      setChatList(await listChats(cloudUser.uid));
     }
-    // free chat → AI
-    const history = [...msgs, { who: "you", text }].slice(-10)
-      .map((m) => ({ role: m.who === "you" ? "user" : "assistant", content: m.text }));
-    const r = await fetch("/api/chat", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: history, apiKey: settings.apiKey,
-        system: `${PERSONALITIES[settings.personality]} The user is called ${shownName}.`,
-      }),
-    }).then((x) => x.json()).catch(() => ({ text: "Couldn't reach the server." }));
-    novaSay(r.text);
-  }, [msgs, sys, settings, action, addLog, novaSay]);
+  }, [msgs, currentChat, cloudUser, runCommand, addLog, novaSay]);
+
+  /* ---- chat history actions ---- */
+  const newChat = useCallback(() => {
+    setCurrentChat(null);
+    setMsgs([{ who: "nova", text: "New chat started. What can I do for you?" }]);
+  }, []);
+
+  const openChat = useCallback(async (id: string) => {
+    if (!cloudUser) return;
+    const messages = await loadChat(cloudUser.uid, id);
+    setCurrentChat(id);
+    setMsgs(messages.length ? messages : [{ who: "nova", text: "(empty chat)" }]);
+  }, [cloudUser]);
+
+  const removeChat = useCallback(async (id: string) => {
+    if (!cloudUser) return;
+    await deleteChat(cloudUser.uid, id);
+    if (currentChat === id) newChat();
+    setChatList(await listChats(cloudUser.uid));
+  }, [cloudUser, currentChat, newChat]);
 
   /* ---- automations ---- */
   const toggleMode = (mode: string) => {
@@ -268,6 +275,7 @@ function NovaApp() {
     setTimeout(() => { setBooting(null); addLog("NOVA core re-initialized"); }, 350 * BOOT_LINES.length + 900);
   };
 
+  const accent = ACCENTS[settings.accent] ?? ACCENTS.Cyan;
 
   return (
     <main
@@ -321,7 +329,9 @@ function NovaApp() {
           settings={settings} tasks={tasks} exam={exam} action={action}
           toggleMode={toggleMode} setPage={setPage} hideFeed={!!modes["Focus Mode"]} />}
         {page === "AI Assistant" && <Assistant msgs={msgs} send={send} voiceOn={voiceOn}
-          setVoiceOn={setVoiceOn} settings={settings} addLog={addLog} />}
+          setVoiceOn={setVoiceOn} settings={settings} addLog={addLog}
+          chatList={chatList} currentChat={currentChat} onNewChat={newChat}
+          onOpenChat={openChat} onDeleteChat={removeChat} />}
         {page === "System Monitor" && <Monitor sys={sys} />}
         {page === "School" && <School tasks={tasks} setTasks={setTasks} exam={exam}
           setExam={setExam} timer={timer} setTimer={setTimer} />}
@@ -410,9 +420,12 @@ function Dashboard(props: {
   );
 }
 
-function Assistant({ msgs, send, voiceOn, setVoiceOn, settings, addLog }: {
+function Assistant({ msgs, send, voiceOn, setVoiceOn, settings, addLog,
+  chatList, currentChat, onNewChat, onOpenChat, onDeleteChat }: {
   msgs: Msg[]; send: (t: string) => void; voiceOn: boolean; setVoiceOn: (b: boolean) => void;
   settings: { apiKey: string }; addLog: (s: string) => void;
+  chatList: ChatSummary[]; currentChat: string | null;
+  onNewChat: () => void; onOpenChat: (id: string) => void; onDeleteChat: (id: string) => void;
 }) {
   const [input, setInput] = useState("");
   const [imgPrompt, setImgPrompt] = useState("");
@@ -435,7 +448,28 @@ function Assistant({ msgs, send, voiceOn, setVoiceOn, settings, addLog }: {
   };
 
   return (
-    <div className="grid grid-cols-3 gap-5">
+    <div className="grid grid-cols-4 gap-5">
+      {/* chat history */}
+      <div className="rounded-3xl border border-[var(--acc-border)] bg-white/5 p-4 flex flex-col min-h-[560px]">
+        <button onClick={onNewChat}
+          className="w-full rounded-xl bg-[var(--acc)] text-black font-bold py-3 mb-3">
+          + New chat
+        </button>
+        <p className="text-xs text-zinc-500 mb-2 px-1">HISTORY</p>
+        <div className="flex-1 overflow-y-auto space-y-1">
+          {chatList.length === 0 && <p className="text-zinc-600 text-xs px-1">No saved chats yet.</p>}
+          {chatList.map((c) => (
+            <div key={c.id}
+              className={`group flex items-center gap-1 rounded-lg px-2 py-2 text-sm cursor-pointer ${
+                currentChat === c.id ? "bg-[var(--acc-soft)] text-[var(--acc)]" : "text-zinc-300 hover:bg-white/5"}`}>
+              <span onClick={() => onOpenChat(c.id)} className="flex-1 truncate">{c.title}</span>
+              <button onClick={() => onDeleteChat(c.id)}
+                className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 px-1">✕</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="col-span-2 rounded-3xl border border-[var(--acc-border)] bg-black/50 p-6 flex flex-col min-h-[560px]">
         <h3 className="text-2xl text-[var(--acc)] font-bold">NOVA Chat</h3>
         <div ref={feedRef} className="mt-5 flex-1 space-y-3 overflow-y-auto pr-2">

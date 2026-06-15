@@ -1,5 +1,7 @@
+// Firebase init for NOVA OS
 import { getApps, initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBsPCSCT1_3yHR2tS36gMc0nU38mkRmH7w",
@@ -13,3 +15,4 @@ const firebaseConfig = {
 
 const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+export const db = getFirestore(app);
